@@ -96,12 +96,26 @@ Points::Pointer ClonePoints(const PointSet::Pointer& source, CloneContext& conte
 }
 
 CellArray::Pointer CloneCells(CellArray* source, std::string& errorMessage) {
-    if (!source) { return nullptr; }
+    if (!source) {
+        errorMessage = "Cannot clone a null CellArray.";
+        return nullptr;
+    }
 
     auto cells = CellArray::New();
-    if (!cells->DeepCopy(source)) {
-        errorMessage = "Failed to clone a CellArray.";
-        return nullptr;
+    for (IGsize cellId = 0; cellId < source->GetNumberOfCells(); ++cellId) {
+        const igIndex* pointIds = nullptr;
+        const int pointCount = source->GetCellIds(cellId, pointIds);
+        if (pointCount < 0 || (pointCount > 0 && !pointIds)) {
+            errorMessage = "Failed to read cell connectivity while cloning a CellArray.";
+            return nullptr;
+        }
+
+        const IGsize copiedCellId = cells->AddCellIds(pointIds, pointCount);
+        if (copiedCellId != cellId) {
+            errorMessage = "Failed to preserve cell order while cloning a CellArray.";
+            return nullptr;
+        }
+        if (source->IsDeleted(cellId)) { cells->DeleteCell(copiedCellId); }
     }
     return cells;
 }

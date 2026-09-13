@@ -1,4 +1,5 @@
 #include <GlobalIds/iGameGenerateGlobalIdsFilter.h>
+#include <ModelSurface/iGameModelGeometryFilter.h>
 
 #include "iGameAttributeSet.h"
 #include "iGameCellArray.h"
@@ -13,6 +14,7 @@
 #include "iGameUnstructuredMesh.h"
 #include "iGameVolumeMesh.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <iomanip>
@@ -137,6 +139,79 @@ void CheckIdRange(const DoubleArray::Pointer& ids, IGsize count, iguIndex64 star
               label + " has an unexpected value at index " + std::to_string(i) + ".");
     }
 }
+
+using CanonicalCell = std::vector<igIndex>;
+using CanonicalCells = std::vector<CanonicalCell>;
+
+CanonicalCells CanonicalizeCells(CellArray* cells) {
+    Check(cells != nullptr, "Cannot canonicalize a null CellArray.");
+
+    CanonicalCells result;
+    result.reserve(cells->GetNumberOfCells());
+    for (IGsize cellId = 0; cellId < cells->GetNumberOfCells(); ++cellId) {
+        const igIndex* ids = nullptr;
+        const int count = cells->GetCellIds(cellId, ids);
+        Check(count >= 0 && (count == 0 || ids != nullptr),
+              "A CellArray returned invalid connectivity.");
+
+        CanonicalCell cell;
+        if (count > 0) { cell.assign(ids, ids + count); }
+        std::sort(cell.begin(), cell.end());
+        result.emplace_back(std::move(cell));
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+void CheckUnstructuredTopologyEqual(const UnstructuredMesh::Pointer& source,
+                                    const UnstructuredMesh::Pointer& output) {
+    Check(source != nullptr && output != nullptr,
+          "Cannot compare null UnstructuredMesh objects.");
+    Check(source->GetNumberOfPoints() == output->GetNumberOfPoints(),
+          "The independent output changed the point count.");
+    Check(source->GetNumberOfCells() == output->GetNumberOfCells(),
+          "The independent output changed the cell count.");
+
+    for (IGsize pointId = 0; pointId < source->GetNumberOfPoints(); ++pointId) {
+        const auto& sourcePoint = source->GetPoint(pointId);
+        const auto& outputPoint = output->GetPoint(pointId);
+        Check(sourcePoint[0] == outputPoint[0] && sourcePoint[1] == outputPoint[1] &&
+                      sourcePoint[2] == outputPoint[2],
+              "The independent output changed point coordinates at point " +
+                      std::to_string(pointId) + ".");
+    }
+
+    for (IGsize cellId = 0; cellId < source->GetNumberOfCells(); ++cellId) {
+        Check(source->GetCellType(cellId) == output->GetCellType(cellId),
+              "The independent output changed the type of cell " +
+                      std::to_string(cellId) + ".");
+
+        const igIndex* sourceIds = nullptr;
+        const igIndex* outputIds = nullptr;
+        const int sourceCount = source->GetCellPointIds(cellId, sourceIds);
+        const int outputCount = output->GetCellPointIds(cellId, outputIds);
+        Check(sourceCount == outputCount,
+              "The independent output changed the size of cell " +
+                      std::to_string(cellId) + ".");
+        for (int i = 0; i < sourceCount; ++i) {
+            Check(sourceIds[i] == outputIds[i],
+                  "The independent output changed connectivity in cell " +
+                          std::to_string(cellId) + ".");
+        }
+    }
+}
+
+CanonicalCells ExtractCanonicalSurface(const UnstructuredMesh::Pointer& mesh) {
+    auto surface = SurfaceMesh::New();
+    auto extractor = ModelGeometryFilter::New();
+    // Preserve source point IDs while comparing topology.  The default merge
+    // pass assigns compact IDs in face-discovery order, which is allowed to
+    // differ between parallel extractions even when the geometry is identical.
+    extractor->SetPointMerging(false);
+    Check(extractor->Execute(mesh, surface) != 0,
+          "ModelGeometryFilter failed while checking render topology.");
+    return CanonicalizeCells(surface->GetFaces());
+}
 /**
  * @brief 读取真实 UnstructuredGrid，生成带偏移的全局 ID，并测试 ExistingIdPolicy。
  */
@@ -178,6 +253,24 @@ void TestFileModelAndExistingPolicies() {
     Check(FindAttribute(mesh, "GlobalPointIds", IG_POINT) == nullptr &&
                   FindAttribute(mesh, "GlobalCellIds", IG_CELL) == nullptr,
           "Initial generation modified the input model.");
+
+    auto sourceUnstructured = DynamicCast<UnstructuredMesh>(mesh);
+    auto outputUnstructured = DynamicCast<UnstructuredMesh>(generatedMesh);
+    CheckUnstructuredTopologyEqual(sourceUnstructured, outputUnstructured);
+
+    const auto sourceSurface = ExtractCanonicalSurface(sourceUnstructured);
+    const auto outputSurface = ExtractCanonicalSurface(outputUnstructured);
+    std::cout << "  Render surface faces: source=" << sourceSurface.size()
+              << ", output=" << outputSurface.size() << '\n';
+    Check(sourceSurface == outputSurface,
+          "The independent output changed the extracted render surface.");
+
+    // Repeating the extraction catches non-deterministic reconstruction defects.
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        Check(ExtractCanonicalSurface(outputUnstructured) == sourceSurface,
+              "Repeated render-surface extraction changed at iteration " +
+                      std::to_string(iteration) + ".");
+    }
 
     auto pointIds = FindDoubleArray(generatedMesh, "GlobalPointIds", IG_POINT);
     auto cellIds = FindDoubleArray(generatedMesh, "GlobalCellIds", IG_CELL);
