@@ -2,7 +2,7 @@
 
 ## 功能
 
-`iGame::TriangleStripFilter` 将共享边的相邻三角形组织为三角带，并提取输入表面的边界边。开启连续片段合并后，首尾点 ID 相同的边界段会被连接为 `IG_POLY_LINE` 折线。
+`iGame::TriangleStripFilter` 将共享边的相邻三角形组织为三角带，并处理输入中已有的 `IG_LINE`/`IG_POLY_LINE` 单元。开启连续片段合并后，首尾点 ID 相同的输入线段会被连接为 `IG_POLY_LINE` 折线。与 ParaView 的 `vtkStripper` 一致，过滤器不会把三角面边界自动转换成折线。
 
 算法采用逐面访问和贪心延伸方式：从一个未处理三角形的三个局部有向边分别试探，选择覆盖三角形数量最多的候选带，然后继续处理剩余三角形。
 
@@ -18,9 +18,9 @@ Filter 的输出同时保存两种互补表示：
 核心 Filter 支持以下输入：
 
 - `SurfaceMesh`。
-- 只包含二维表面单元的 `UnstructuredMesh`。
+- 包含二维表面单元以及可选 `IG_LINE`/`IG_POLY_LINE` 单元的 `UnstructuredMesh`。
 
-体网格或混合维度 `UnstructuredMesh` 应先提取表面，再进行三角化。非三角形表面不会参与三角带生成，而是通过 `GetPassThroughPolys()` 原样保留。
+体网格应先提取表面，再进行三角化。非三角形表面不会参与三角带生成，而是通过 `GetPassThroughPolys()` 原样保留。
 
 可读取的结果包括：
 
@@ -31,7 +31,7 @@ Filter 的输出同时保存两种互补表示：
 | `TriangleStripFilter::GetStrips()` | 执行期间生成的原生三角带 |
 | `TriangleStripFilter::GetStripSourceFaceIds()` | 执行期间生成的三角形到输入 face ID 映射 |
 | `GetPassThroughPolys()` | 未参与三角带生成的非三角形面 |
-| `GetPolyLines()` | 输入表面的边界段，或合并后的连续边界折线 |
+| `GetPolyLines()` | 输入中已有的线/折线单元，或合并后的连续折线 |
 | `GetNumberOfStrips()` | 生成的三角带数量 |
 | `GetLongestStripLength()` | 最长三角带包含的三角形数量 |
 
@@ -58,12 +58,12 @@ filter->SetMaximumLength(1000);
 filter->SetJoinContiguousSegments(true);
 ```
 
-- `false`：每条边界边作为一个含两个点 ID 的线段输出。
-- `true`：比较各线段的首尾点 ID，必要时反转方向后拼接为连续折线。
+- `false`：保持输入中已有的 `IG_LINE`/`IG_POLY_LINE` 单元。
+- `true`：比较输入线/折线的首尾点 ID，必要时反转方向后拼接为连续折线。
 
-闭合边界的合并折线会重复起点。例如，由 10 条连续边界段组成的闭合边界会生成一条包含 11 个点 ID 的折线，且第一个和最后一个点 ID 相同。
+闭合输入线的合并结果会重复起点。例如，由 10 条连续线段组成的闭合环会生成一条包含 11 个点 ID 的折线，且第一个和最后一个点 ID 相同。
 
-该选项只处理边界折线，不会把不同三角带连接在一起。
+该选项只处理输入中已有的线单元，不会把不同三角带连接在一起，也不会提取表面边界。
 
 ## 调用方式
 
@@ -113,9 +113,9 @@ void BuildStrips(const iGame::SurfaceMesh::Pointer& triangles) {
                   << ", triangles=" << triangleCount << '\n';
     }
 
-    auto* boundaryLines = filter->GetPolyLines();
-    std::cout << "boundary polylines="
-              << boundaryLines->GetNumberOfCells() << '\n';
+    auto* inputLines = filter->GetPolyLines();
+    std::cout << "input polylines="
+              << inputLines->GetNumberOfCells() << '\n';
 }
 ```
 
@@ -178,7 +178,7 @@ Examples/Filter/TriangleStrip/TestTriangleStrip.cpp
 Examples/Filter/TriangleStrip/TestTriangleStripWidget.cpp
 ```
 
-两个程序都固定读取 `Models/TriangleStripTestModel.vtk`。该模型包含 10 个点和 8 个连续三角形，默认生成 1 条长度 8 的三角带；表面具有 10 条连续边界段，开启合并后得到 1 条闭合折线。
+两个程序都固定读取 `Models/TriangleStripTestModel.vtk`。该模型包含 10 个点和 8 个连续三角形，默认生成 1 条长度 8 的三角带。模型不含显式线单元，因此即使表面是开放的，`GetPolyLines()` 也应返回 0 个单元，UI 不会额外发布折线模型。测试程序还会在内存中添加 4 条连续的 `IG_LINE`，验证开启合并后得到 1 条包含 5 个点 ID 的开放折线。
 
 ## 注意事项
 
@@ -189,7 +189,7 @@ Examples/Filter/TriangleStrip/TestTriangleStripWidget.cpp
 5. `GetPolyLines()` 和 `GetPassThroughPolys()` 仍由 Filter 管理，需要长期保存时应复制相应数据。
 6. 三角带沿唯一可用的相邻三角面继续延伸。遇到边界、已处理面或无法唯一选择的非流形邻面时，当前条带会终止。
 7. 当前算法是依赖输入面顺序的贪心算法，不保证得到全局最少的三角带数量。
-8. `SetJoinContiguousSegments(true)` 只按点 ID 连通关系连接边界段，不进行几何距离容差合并；坐标相同但点 ID 不同的端点不会连接。
-9. 闭合表面没有边界边，因此 `GetPolyLines()` 的单元数量为 `0`。
+8. `SetJoinContiguousSegments(true)` 只按点 ID 连通关系连接输入线单元，不进行几何距离容差合并；坐标相同但点 ID 不同的端点不会连接。
+9. 三角面边界不会进入 `GetPolyLines()`；只有输入中明确存在的 `IG_LINE`/`IG_POLY_LINE` 才会进入折线处理。
 10. PointData 会保持点对应关系；CellData 会根据三角带展开后的源面映射重排。调用者不应假设输出面顺序与输入面顺序完全一致。
 11. UI 会先尝试提取表面并三角化；直接使用核心 Filter 时，调用者需要自行保证输入是表面网格。

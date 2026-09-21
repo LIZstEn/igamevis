@@ -27,9 +27,9 @@ constexpr const char* PointVectorName = "TriangleStripTestPointVector";
 constexpr const char* CellScalarName = "TriangleStripTestCellScalar";
 constexpr IGsize ExpectedTriangleCount = 8;
 constexpr IGsize ExpectedFullStripCount = 1;
-constexpr IGsize ExpectedBoundarySegmentCount = 10;
+constexpr IGsize ExpectedInputLineSegmentCount = 4;
 constexpr IGsize ExpectedJoinedPolylineCount = 1;
-constexpr int ExpectedJoinedPointCount = 11;
+constexpr int ExpectedJoinedPointCount = 5;
 
 void Check(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
@@ -381,24 +381,58 @@ void TestTriangleStripGeneration(const SurfaceMesh::Pointer& triangles) {
 }
 
 void TestContiguousPolylineJoining(const SurfaceMesh::Pointer& triangles) {
+    // An open triangle surface must not manufacture boundary lines. This is
+    // the vtkStripper/ParaView behavior being guarded by this regression test.
+    auto surfaceOnly = TriangleStripFilter::New();
+    surfaceOnly->SetInput(triangles);
+    surfaceOnly->SetJoinContiguousSegments(true);
+    Check(surfaceOnly->Execute(),
+          "TriangleStripFilter failed for the surface-only line test.");
+    Check(surfaceOnly->GetPolyLines() != nullptr &&
+                  surfaceOnly->GetPolyLines()->GetNumberOfCells() == 0,
+          "Triangle boundaries were incorrectly emitted as input polylines.");
+
+    // Add four explicit, contiguous IG_LINE cells to the triangle input.
+    // Only these cells are eligible for JoinContiguousSegments.
+    auto mixedCells = CellArray::New();
+    auto mixedTypes = UnsignedIntArray::New();
+    for (IGsize faceId = 0; faceId < triangles->GetNumberOfFaces(); ++faceId) {
+        const igIndex* pointIds = nullptr;
+        const int pointCount = triangles->GetFaces()->GetCellIds(
+                faceId, pointIds);
+        mixedCells->AddCellIds(pointIds, pointCount);
+        mixedTypes->AddValue(IG_TRIANGLE);
+    }
+    for (igIndex pointId = 0; pointId < 4; ++pointId) {
+        const igIndex line[2]{pointId, pointId + 1};
+        mixedCells->AddCellIds(line, 2);
+        mixedTypes->AddValue(IG_LINE);
+    }
+    auto mixedInput = UnstructuredMesh::New();
+    mixedInput->SetName("TriangleStripExplicitLines");
+    mixedInput->SetPoints(triangles->GetPoints());
+    mixedInput->SetCells(mixedCells, mixedTypes);
+    mixedInput->SetAttributeSet(
+            AttributeSet::Pointer(triangles->GetAttributeSet()));
+
     auto separate = TriangleStripFilter::New();
-    separate->SetInput(triangles);
+    separate->SetInput(mixedInput);
     separate->SetJoinContiguousSegments(false);
     Check(separate->Execute(),
-          "TriangleStripFilter failed with separate boundary segments.");
+          "TriangleStripFilter failed with separate input line segments.");
 
     auto* separateLines = separate->GetPolyLines();
     Check(separateLines != nullptr, "Separate polyline array is null.");
-    Check(separateLines->GetNumberOfCells() == ExpectedBoundarySegmentCount,
-          "The test model has an unexpected boundary-segment count.");
+    Check(separateLines->GetNumberOfCells() == ExpectedInputLineSegmentCount,
+          "The explicit input has an unexpected line-segment count.");
     for (IGsize lineId = 0; lineId < separateLines->GetNumberOfCells();
          ++lineId) {
         Check(separateLines->GetCellSize(lineId) == 2,
-              "Join disabled: a boundary segment is not a two-point line.");
+              "Join disabled: an input segment is not a two-point line.");
     }
 
     auto joined = TriangleStripFilter::New();
-    joined->SetInput(triangles);
+    joined->SetInput(mixedInput);
     joined->SetJoinContiguousSegments(true);
     Check(joined->Execute(),
           "TriangleStripFilter failed while joining boundary segments.");
@@ -406,27 +440,26 @@ void TestContiguousPolylineJoining(const SurfaceMesh::Pointer& triangles) {
     auto* joinedLines = joined->GetPolyLines();
     Check(joinedLines != nullptr, "Joined polyline array is null.");
     Check(joinedLines->GetNumberOfCells() == ExpectedJoinedPolylineCount,
-          "The contiguous model boundary was not joined into one polyline.");
+          "The contiguous input lines were not joined into one polyline.");
 
     const igIndex* joinedPointIds = nullptr;
     const int joinedPointCount = joinedLines->GetCellIds(0, joinedPointIds);
     Check(joinedPointIds != nullptr &&
                   joinedPointCount == ExpectedJoinedPointCount,
           "The joined model boundary has an unexpected point count.");
-    Check(joinedPointIds[0] == joinedPointIds[joinedPointCount - 1],
-          "The joined triangle boundary is not closed.");
-
     std::unordered_set<igIndex> distinctPointIds;
-    for (int i = 0; i + 1 < joinedPointCount; ++i) {
-        Check(joinedPointIds[i] != joinedPointIds[i + 1],
-              "The joined polyline contains a zero-length segment.");
+    for (int i = 0; i < joinedPointCount; ++i) {
+        if (i + 1 < joinedPointCount) {
+            Check(joinedPointIds[i] != joinedPointIds[i + 1],
+                  "The joined polyline contains a zero-length segment.");
+        }
         distinctPointIds.insert(joinedPointIds[i]);
     }
     Check(distinctPointIds.size() ==
-                  static_cast<std::size_t>(ExpectedJoinedPointCount - 1),
-          "The joined model boundary does not contain every boundary point.");
+                  static_cast<std::size_t>(ExpectedJoinedPointCount),
+          "The joined polyline does not contain every input point.");
 
-    std::cout << "  Boundary polylines: before join="
+    std::cout << "  Explicit input polylines: before join="
               << separateLines->GetNumberOfCells()
               << ", after join=" << joinedLines->GetNumberOfCells()
               << ", joined point IDs=" << joinedPointCount << '\n';

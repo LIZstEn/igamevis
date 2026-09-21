@@ -161,16 +161,100 @@ bool TriangleStripFilter::PrepareInput() {
         case IG_SURFACE_MESH:
             m_InputMesh = DynamicCast<SurfaceMesh>(m_SourceInput);
             break;
-        case IG_UNSTRUCTURED_MESH:
+        case IG_UNSTRUCTURED_MESH: {
             m_UnstructuredInput = DynamicCast<UnstructuredMesh>(m_SourceInput);
-            m_InputMesh = m_UnstructuredInput->TransferToSurfaceMesh();
-            if (!m_InputMesh) {
-                igError("TriangleStripFilter requires surface cells. ");
+            if (!m_UnstructuredInput || !m_UnstructuredInput->GetCells()) {
+                igError("TriangleStripFilter received an invalid UnstructuredMesh. ");
                 return false;
             }
+
+            bool hasExplicitLines = false;
+            for (igIndex cellId = 0;
+                 cellId < m_UnstructuredInput->GetNumberOfCells(); ++cellId) {
+                const IGenum cellType = m_UnstructuredInput->GetCellType(cellId);
+                if (cellType == IG_LINE || cellType == IG_POLY_LINE) {
+                    hasExplicitLines = true;
+                } else if (Cell::GetCellDimension(cellType) != 2) {
+                    igError("TriangleStripFilter only accepts surface cells and explicit lines. ");
+                    return false;
+                }
+            }
+
+            // Preserve the original surface-only path and its AttributeSet
+            // behavior. Additional extraction/remapping is only required for
+            // mixed surface/line inputs, which SurfaceMesh cannot represent.
+            if (!hasExplicitLines) {
+                m_InputMesh = m_UnstructuredInput->TransferToSurfaceMesh();
+                if (!m_InputMesh) {
+                    igError("TriangleStripFilter requires surface cells. ");
+                    return false;
+                }
+                break;
+            }
+
+            auto faces = CellArray::New();
+            std::vector<igIndex> sourceFaceIds;
+            for (igIndex cellId = 0;
+                 cellId < m_UnstructuredInput->GetNumberOfCells(); ++cellId) {
+                const IGenum cellType = m_UnstructuredInput->GetCellType(cellId);
+                const int dimension = Cell::GetCellDimension(cellType);
+                if (dimension == 2) {
+                    const igIndex* pointIds = nullptr;
+                    const int pointCount = m_UnstructuredInput->GetCells()->GetCellIds(
+                            cellId, pointIds);
+                    if (!pointIds || pointCount < 3) {
+                        igError("TriangleStripFilter found an invalid surface cell. ");
+                        return false;
+                    }
+                    faces->AddCellIds(pointIds, pointCount);
+                    sourceFaceIds.push_back(cellId);
+                } else if (cellType != IG_LINE && cellType != IG_POLY_LINE) {
+                    igError("TriangleStripFilter only accepts surface cells and explicit lines. ");
+                    return false;
+                }
+            }
+            if (faces->GetNumberOfCells() == 0) {
+                igError("TriangleStripFilter requires at least one surface cell. ");
+                return false;
+            }
+
+            m_InputMesh = SurfaceMesh::New();
+            m_InputMesh->SetName(m_UnstructuredInput->GetName());
+            m_InputMesh->SetPoints(m_UnstructuredInput->GetPoints());
+            m_InputMesh->SetFaces(faces);
+
+            // A mixed unstructured input may interleave lines and faces. Build
+            // face-only CellData so local face IDs remain valid for strip
+            // generation and output attribute remapping.
+            auto surfaceAttributes = AttributeSet::New();
+            if (auto* inputAttributes = m_UnstructuredInput->GetAttributeSet()) {
+                for (IGsize attributeId = 0;
+                     attributeId < inputAttributes->GetNumberOfAttributes();
+                     ++attributeId) {
+                    auto& attribute = inputAttributes->GetAttribute(attributeId);
+                    if (attribute.isDeleted || !attribute.pointer) continue;
+                    if (attribute.attachmentType == IG_POINT) {
+                        surfaceAttributes->AddAttribute(
+                                attribute.type, IG_POINT, attribute.pointer,
+                                attribute.GetDataRange());
+                    } else if (attribute.attachmentType == IG_CELL) {
+                        auto faceArray = CopyArrayTuplesByType(
+                                attribute.pointer, sourceFaceIds);
+                        if (!faceArray) {
+                            igError("TriangleStripFilter could not extract face CellData. ");
+                            return false;
+                        }
+                        surfaceAttributes->AddAttribute(
+                                attribute.type, IG_CELL, faceArray,
+                                attribute.GetDataRange());
+                    }
+                }
+            }
+            m_InputMesh->SetAttributeSet(surfaceAttributes);
             break;
+        }
         default:
-            igError("TriangleStripFilter only supports SurfaceMesh or surface-only UnstructuredMesh. ");
+            igError("TriangleStripFilter only supports SurfaceMesh or surface/line UnstructuredMesh. ");
             return false;
     }
     return m_InputMesh != nullptr;
@@ -490,17 +574,27 @@ void TriangleStripFilter::JoinContiguousPolyLines() {
 }
 
 bool TriangleStripFilter::BuildPolyLines() {
-    if (!m_InputMesh || !m_PolyLines) return false;
-    const IGsize numEdges = m_InputMesh->GetNumberOfEdges();
-    for (igIndex edgeId = 0; edgeId < numEdges; ++edgeId) {
-        const igIndex* faceIds = nullptr;
-        int faceCount = 0;
-        m_InputMesh->GetEdgeToNeighborFaces(edgeId, faceIds, faceCount);
-        if (faceCount == 1) {
-            igIndex pointIds[2]{};
-            const int count = m_InputMesh->GetEdgePointIds(edgeId, pointIds);
-            if (count == 2) { m_PolyLines->AddCellIds(pointIds, 2); }
+    if (!m_PolyLines) return false;
+
+    // vtkStripper processes line cells already present in vtkPolyData; it does
+    // not turn open polygon boundaries into new lines. SurfaceMesh has no line
+    // cell container, so only an UnstructuredMesh input can contribute here.
+    if (!m_UnstructuredInput) return true;
+
+    auto inputCells = m_UnstructuredInput->GetCells();
+    if (!inputCells) return false;
+    for (igIndex cellId = 0;
+         cellId < m_UnstructuredInput->GetNumberOfCells(); ++cellId) {
+        const IGenum cellType = m_UnstructuredInput->GetCellType(cellId);
+        if (cellType != IG_LINE && cellType != IG_POLY_LINE) continue;
+
+        const igIndex* pointIds = nullptr;
+        const int pointCount = inputCells->GetCellIds(cellId, pointIds);
+        if (!pointIds || pointCount < 2) {
+            igError("TriangleStripFilter found an invalid input line cell. ");
+            return false;
         }
+        m_PolyLines->AddCellIds(pointIds, pointCount);
     }
     return true;
 }

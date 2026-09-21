@@ -17,8 +17,7 @@
 namespace {
 constexpr const char* ModelFilePath = "Models/TriangleStripTestModel.vtk";
 constexpr const char* ExpectedTriangleCount = "8";
-constexpr IGsize ExpectedBoundarySegmentCount = 10;
-constexpr int ExpectedJoinedPointCount = 11;
+constexpr int ExpectedJoinedPointCount = 5;
 
 void Check(bool condition, const char* message) {
     if (!condition) { throw std::runtime_error(message); }
@@ -35,7 +34,15 @@ T* Control(QWidget* panel, const char* name) {
 
 int main(int argc, char** argv) {
     Q_INIT_RESOURCE(iGameQtMainWindow);
-    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) { qputenv("QT_QPA_PLATFORM", "offscreen"); }
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+#if defined(Q_OS_WIN)
+        // The deployed Qt 5 Windows runtime provides qwindows.dll but does
+        // not necessarily ship a qoffscreen platform plugin.
+        qputenv("QT_QPA_PLATFORM", "windows");
+#else
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+#endif
+    }
     QApplication app(argc, argv);
     try {
         // Windows' offscreen platform does not enumerate system fonts. Use the
@@ -62,10 +69,12 @@ int main(int argc, char** argv) {
 
         int resultCount = 0;
         iGame::DataObject::Pointer lastSurface;
+        iGame::DataObject::Pointer lastLines;
         QObject::connect(panel, &igQtTriangleStripWidget::resultReady,
                          [&](iGame::DataObject::Pointer surface, iGame::DataObject::Pointer lines) {
                              ++resultCount;
                              lastSurface = surface;
+                             lastLines = lines;
                              Check(panel->isOutput(surface), "Surface output is not recognized");
                              Check(!lines || panel->isOutput(lines), "Line output is not recognized");
                          });
@@ -93,11 +102,10 @@ int main(int argc, char** argv) {
                       publishedStrips->GetCellSize(0) == 10 &&
                       publishedSourceFaceIds->GetCellSize(0) == 8,
               "Published triangle-strip topology is invalid");
-        Check(panel->polyLineOutput() &&
-                      panel->polyLineOutput()->GetNumberOfCells() == ExpectedBoundarySegmentCount,
-              "Open test model has an unexpected boundary-segment count");
-        Check(Control<QLabel>(panel, "polyLineCount")->text() == QStringLiteral("10 → 10"),
-              "Wrong unmerged boundary statistics");
+        Check(!lastLines && panel->polyLineOutput() == nullptr,
+              "Triangle boundaries were incorrectly published as a line model");
+        Check(Control<QLabel>(panel, "polyLineCount")->text() == QStringLiteral("0 → 0"),
+              "Surface-only input has incorrect line statistics");
         Check(panel->input() == testModel.get(), "Apply changed the source to its output");
 
         length->setValue(4);
@@ -117,23 +125,57 @@ int main(int argc, char** argv) {
         join->setChecked(true);
         apply->click();
         Check(panel->lastFilter()->GetJoinContiguousSegments(), "Merge checkbox not passed to filter");
+        Check(!lastLines && panel->polyLineOutput() == nullptr,
+              "Join option manufactured lines from triangle boundaries");
+
+        // ParaView/vtkStripper only joins line cells explicitly present in the
+        // input. Add four contiguous lines and verify that this input does
+        // produce a separate drawable line result in iGameVis.
+        auto sourceMesh = iGame::DynamicCast<iGame::UnstructuredMesh>(testModel);
+        Check(sourceMesh != nullptr, "Test model is not an UnstructuredMesh");
+        auto mixedCells = iGame::CellArray::New();
+        auto mixedTypes = iGame::UnsignedIntArray::New();
+        for (IGsize cellId = 0; cellId < sourceMesh->GetNumberOfCells(); ++cellId) {
+            const igIndex* pointIds = nullptr;
+            const int pointCount = sourceMesh->GetCells()->GetCellIds(
+                    cellId, pointIds);
+            mixedCells->AddCellIds(pointIds, pointCount);
+            mixedTypes->AddValue(sourceMesh->GetCellType(cellId));
+        }
+        for (igIndex pointId = 0; pointId < 4; ++pointId) {
+            const igIndex line[2]{pointId, pointId + 1};
+            mixedCells->AddCellIds(line, 2);
+            mixedTypes->AddValue(iGame::IG_LINE);
+        }
+        auto mixedInput = iGame::UnstructuredMesh::New();
+        mixedInput->SetName("TriangleStripExplicitLines");
+        mixedInput->SetPoints(sourceMesh->GetPoints());
+        mixedInput->SetCells(mixedCells, mixedTypes);
+        mixedInput->SetAttributeSet(
+                iGame::AttributeSet::Pointer(sourceMesh->GetAttributeSet()));
+        panel->setInput(mixedInput);
+        Check(panel->apply() && resultCount == 4,
+              "Mixed surface/line input did not execute");
+
         auto* lines = panel->polyLineOutput();
-        Check(lines && lines->GetNumberOfCells() == 1, "Model boundary segments did not join");
+        Check(lines && lines->GetNumberOfCells() == 1,
+              "Explicit contiguous input lines did not join");
         Check(lines->GetCellType(0) == iGame::IG_POLY_LINE &&
                       lines->GetCells()->GetCellSize(0) == ExpectedJoinedPointCount,
-              "Joined output must be one closed polyline, not a polygon");
+              "Joined output must be one open polyline, not a polygon");
         const igIndex* ids = nullptr;
         lines->GetCells()->GetCellIds(0, ids);
-        Check(ids[0] == ids[ExpectedJoinedPointCount - 1],
-              "Polyline should close at its starting point");
-        Check(Control<QLabel>(panel, "polyLineCount")->text() == QStringLiteral("10 → 1"),
-              "Wrong joined boundary statistics");
+        Check(ids[0] != ids[ExpectedJoinedPointCount - 1],
+              "Open input lines were incorrectly closed");
+        Check(Control<QLabel>(panel, "polyLineCount")->text() == QStringLiteral("4 → 1"),
+              "Wrong joined input-line statistics");
 
-        // Unsupported explicit lines must not be silently dropped by extraction.
+        // A line-only input still fails because there is no surface to strip.
         iGame::UnstructuredMesh::Pointer explicitLines = lines;
         panel->setInput(explicitLines);
         const int successes = resultCount;
-        Check(!panel->apply() && resultCount == successes, "Explicit lines should fail without publishing an empty surface");
+        Check(!panel->apply() && resultCount == successes,
+              "Line-only input should fail without publishing an empty surface");
         Check(!Control<QLabel>(panel, "triangleStripStatus")->text().isEmpty(), "No input error shown");
         panel->setInput(iGame::DataObject::New());
         Check(!apply->isEnabled(), "Unsupported data enabled Apply");

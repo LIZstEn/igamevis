@@ -14,7 +14,7 @@ IGAME_NAMESPACE_BEGIN
 
 /**
  * @class TriangleStripFilter
- * @brief 将相邻三角形组织为三角带，并将表面边界组织为折线。
+ * @brief 将相邻三角形组织为三角带，并处理输入中已有的线/折线单元。
  *
  * 三角带部分以 vtkStripper 的逐面访问流程为基础，同时借鉴 GLU
  * render.c 中 FaceCount、临时 trail 标记和多起始方向比较的结构。
@@ -29,7 +29,7 @@ public:
     static Pointer New() { return new TriangleStripFilter; }
 
     /**
-     * 执行流程：准备表面输入、构造邻接、生成 strips/折线、构造输出对象。
+     * 执行流程：准备表面输入、构造邻接、生成 strips、处理输入折线并构造输出对象。
      */
     bool Execute() override;
 
@@ -41,8 +41,8 @@ public:
     int GetMaximumLength() const noexcept { return m_MaximumLength; }
 
     /**
-     * 控制是否在折线生成后继续合并首尾点 ID 相同的连续折线。
-     * 该选项只影响表面边界线段，不连接三角带。
+     * 控制是否合并输入中首尾点 ID 相同的连续线/折线单元。
+     * 该选项不从三角面生成边界线，也不连接三角带。
      */
     void SetJoinContiguousSegments(bool enabled) noexcept { m_JoinContiguousSegments = enabled; }
     bool GetJoinContiguousSegments() const noexcept { return m_JoinContiguousSegments; }
@@ -53,7 +53,7 @@ public:
     /** 未参与 strip 的非三角形面，语义与 vtkStripper 的 pass-through polys 相同。 */
     CellArray* GetPassThroughPolys() const noexcept { return m_PassThroughPolys.get(); }
 
-    /** 由输入表面边界边生成的线段或连续折线。 */
+    /** 输入中已有的线/折线单元，或合并后的连续折线。 */
     CellArray* GetPolyLines() const noexcept { return m_PolyLines.get(); }
 
     /**
@@ -132,8 +132,9 @@ private:
     void ResetWorkingState();
 
     /**
-     * 将 SurfaceMesh 或只含二维单元的 UnstructuredMesh 准备为 m_InputMesh。
-     * 混合/体网格应先走表面提取；非三角形面在 vtkStripper 模式下原样传递。
+     * 将 SurfaceMesh 或含二维表面单元及可选线单元的 UnstructuredMesh
+     * 准备为 m_InputMesh。体网格应先走表面提取；非三角形面在
+     * vtkStripper 模式下原样传递。
      */
     bool PrepareInput();
 
@@ -144,7 +145,8 @@ private:
     bool BuildTriangleStrips();
 
     /**
-     * 提取只属于一个面的边界边，初始时每条边作为一个两点线段。
+     * 复制 UnstructuredMesh 输入中明确存在的 IG_LINE/IG_POLY_LINE 单元。
+     * 与 vtkStripper 一致，不从三角面边界自动生成线段。
      */
     bool BuildPolyLines();
 
