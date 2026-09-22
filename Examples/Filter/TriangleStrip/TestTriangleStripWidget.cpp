@@ -89,6 +89,8 @@ int main(int argc, char** argv) {
         Check(Control<QLabel>(panel, "trianglesBefore")->text() == ExpectedTriangleCount, "Wrong input triangle count");
         Check(Control<QLabel>(panel, "trianglesAfter")->text() == ExpectedTriangleCount, "Wrong output triangle count");
         Check(panel->lastFilter()->GetNumberOfStrips() == 1, "Model was not converted into one full strip");
+        Check(Control<QLabel>(panel, "outputCellCount")->text() == QStringLiteral("1"),
+              "Wrong ParaView-compatible output-cell count");
         Check(panel->lastFilter()->GetLongestStripLength() == 8, "Full strip has the wrong length");
         auto publishedSurface = iGame::DynamicCast<iGame::SurfaceMesh>(lastSurface);
         iGame::CellArray::Pointer publishedStrips;
@@ -111,6 +113,8 @@ int main(int argc, char** argv) {
         length->setValue(4);
         Check(panel->apply() && resultCount == 2, "Cannot reapply modified parameters");
         Check(panel->lastFilter()->GetNumberOfStrips() == 2, "Length limit did not split the full strip in two");
+        Check(Control<QLabel>(panel, "outputCellCount")->text() == QStringLiteral("2"),
+              "Length-limited output-cell count is incorrect");
         Check(panel->lastFilter()->GetLongestStripLength() == 4, "New length limit ignored");
         publishedSurface = iGame::DynamicCast<iGame::SurfaceMesh>(lastSurface);
         Check(publishedSurface != nullptr &&
@@ -169,6 +173,8 @@ int main(int argc, char** argv) {
               "Open input lines were incorrectly closed");
         Check(Control<QLabel>(panel, "polyLineCount")->text() == QStringLiteral("4 → 1"),
               "Wrong joined input-line statistics");
+        Check(Control<QLabel>(panel, "outputCellCount")->text() == QStringLiteral("3"),
+              "Mixed strip/polyline output-cell count is incorrect");
 
         // A line-only input still fails because there is no surface to strip.
         iGame::UnstructuredMesh::Pointer explicitLines = lines;

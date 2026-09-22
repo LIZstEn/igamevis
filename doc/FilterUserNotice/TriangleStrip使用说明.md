@@ -4,7 +4,7 @@
 
 `iGame::TriangleStripFilter` 将共享边的相邻三角形组织为三角带，并处理输入中已有的 `IG_LINE`/`IG_POLY_LINE` 单元。开启连续片段合并后，首尾点 ID 相同的输入线段会被连接为 `IG_POLY_LINE` 折线。与 ParaView 的 `vtkStripper` 一致，过滤器不会把三角面边界自动转换成折线。
 
-算法采用逐面访问和贪心延伸方式：从一个未处理三角形的三个局部有向边分别试探，选择覆盖三角形数量最多的候选带，然后继续处理剩余三角形。
+算法采用逐面访问和贪心延伸方式：从一个未处理三角形出发，按面内点/边顺序选择第一个可用的相邻三角形，再沿带尾继续延伸。该起始方向与 ParaView 5.12 使用的 `vtkStripper` 9.3 一致。
 
 Filter 的输出同时保存两种互补表示：
 
@@ -33,6 +33,7 @@ Filter 的输出同时保存两种互补表示：
 | `GetPassThroughPolys()` | 未参与三角带生成的非三角形面 |
 | `GetPolyLines()` | 输入中已有的线/折线单元，或合并后的连续折线 |
 | `GetNumberOfStrips()` | 生成的三角带数量 |
+| `GetNumberOfOutputCells()` | ParaView Cells 口径：三角带 + 透传多边形 + 输出折线 |
 | `GetLongestStripLength()` | 最长三角带包含的三角形数量 |
 
 输出表面会创建新的 `AttributeSet`。PointData 保留原数组和点对应关系；CellData 按输出三角面的源 face ID 重新排列。
@@ -116,6 +117,8 @@ void BuildStrips(const iGame::SurfaceMesh::Pointer& triangles) {
     auto* inputLines = filter->GetPolyLines();
     std::cout << "input polylines="
               << inputLines->GetNumberOfCells() << '\n';
+    std::cout << "ParaView-compatible output cells="
+              << filter->GetNumberOfOutputCells() << '\n';
 }
 ```
 
@@ -178,7 +181,7 @@ Examples/Filter/TriangleStrip/TestTriangleStrip.cpp
 Examples/Filter/TriangleStrip/TestTriangleStripWidget.cpp
 ```
 
-两个程序都固定读取 `Models/TriangleStripTestModel.vtk`。该模型包含 10 个点和 8 个连续三角形，默认生成 1 条长度 8 的三角带。模型不含显式线单元，因此即使表面是开放的，`GetPolyLines()` 也应返回 0 个单元，UI 不会额外发布折线模型。测试程序还会在内存中添加 4 条连续的 `IG_LINE`，验证开启合并后得到 1 条包含 5 个点 ID 的开放折线。
+两个程序都固定读取 `Models/TriangleStripTestModel.vtk`。该模型包含 10 个点和 8 个连续三角形，默认生成 1 条长度 8 的三角带。核心测试还会读取较大且已经由三角形组成的 `Models/SurfaceNormalsFilter_test.vtk`，避免两端三角化策略差异干扰对比，并校验 2752 个三角形在 `MaximumLength = 1000` 时与 ParaView 5.12 一样产生 381 个输出 Cells。小模型不含显式线单元，因此即使表面是开放的，`GetPolyLines()` 也应返回 0 个单元，UI 不会额外发布折线模型。测试程序还会在内存中添加 4 条连续的 `IG_LINE`，验证开启合并后得到 1 条包含 5 个点 ID 的开放折线。
 
 ## 注意事项
 
@@ -187,9 +190,10 @@ Examples/Filter/TriangleStrip/TestTriangleStripWidget.cpp
 3. 对第 `i` 条重建三角带，必须满足 `stripSourceFaceIds->GetCellSize(i) == strips->GetCellSize(i) - 2`。映射顺序与该带展开三角形的顺序一致。
 4. Metadata 内部使用 `TriangleStripOffsets`、`TriangleStripPointIds`、`TriangleStripSourceFaceOffsets` 和 `TriangleStripSourceFaceIds` 四个扁平 `IntArray`，不要单独修改其中一个数组。
 5. `GetPolyLines()` 和 `GetPassThroughPolys()` 仍由 Filter 管理，需要长期保存时应复制相应数据。
-6. 三角带沿唯一可用的相邻三角面继续延伸。遇到边界、已处理面或无法唯一选择的非流形邻面时，当前条带会终止。
+6. 三角带按网格返回的第一个边邻面继续延伸。遇到边界、已处理面或第一个邻面不是三角形时，当前条带终止；这一顺序与 `vtkStripper` 一致。
 7. 当前算法是依赖输入面顺序的贪心算法，不保证得到全局最少的三角带数量。
 8. `SetJoinContiguousSegments(true)` 只按点 ID 连通关系连接输入线单元，不进行几何距离容差合并；坐标相同但点 ID 不同的端点不会连接。
 9. 三角面边界不会进入 `GetPolyLines()`；只有输入中明确存在的 `IG_LINE`/`IG_POLY_LINE` 才会进入折线处理。
 10. PointData 会保持点对应关系；CellData 会根据三角带展开后的源面映射重排。调用者不应假设输出面顺序与输入面顺序完全一致。
 11. UI 会先尝试提取表面并三角化；直接使用核心 Filter 时，调用者需要自行保证输入是表面网格。
+12. UI 中“三角带数量”只统计 strips；“输出 Cell 数（ParaView 口径）”还会加上透传多边形和输出折线。纯三角面输入时两者数值相同。

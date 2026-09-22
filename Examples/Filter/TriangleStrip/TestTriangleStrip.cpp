@@ -22,6 +22,8 @@ namespace
 using namespace iGame;
 
 constexpr const char* ModelFilePath = "Models/TriangleStripTestModel.vtk";
+constexpr const char* ParaViewRegressionModelFilePath =
+        "Models/SurfaceNormalsFilter_test.vtk";
 constexpr const char* PointScalarName = "TriangleStripTestPointScalar";
 constexpr const char* PointVectorName = "TriangleStripTestPointVector";
 constexpr const char* CellScalarName = "TriangleStripTestCellScalar";
@@ -30,6 +32,8 @@ constexpr IGsize ExpectedFullStripCount = 1;
 constexpr IGsize ExpectedInputLineSegmentCount = 4;
 constexpr IGsize ExpectedJoinedPolylineCount = 1;
 constexpr int ExpectedJoinedPointCount = 5;
+constexpr IGsize ExpectedParaViewTriangleCount = 2752;
+constexpr IGsize ExpectedParaViewOutputCellCount = 381;
 
 void Check(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
@@ -230,6 +234,8 @@ void ValidateStripCoverage(const TriangleStripFilter::Pointer& filter,
     Check(strips->GetNumberOfCells() > 0, "No triangle strips were generated.");
     Check(filter->GetNumberOfStrips() == strips->GetNumberOfCells(),
           "GetNumberOfStrips disagrees with the strip cell array.");
+    Check(filter->GetNumberOfOutputCells() == filter->GetNumberOfStrips(),
+          "Pure triangle output cells must equal the strip count.");
     Check(filter->GetLongestStripLength() > 1,
           "The model was reduced only to one-triangle strips.");
     Check(filter->GetLongestStripLength() <=
@@ -380,6 +386,36 @@ void TestTriangleStripGeneration(const SurfaceMesh::Pointer& triangles) {
                  "persist after filter destruction\n";
 }
 
+void TestParaViewOutputCellCount() {
+    const std::filesystem::path modelPath{ParaViewRegressionModelFilePath};
+    Check(std::filesystem::exists(modelPath),
+          "The ParaView comparison model does not exist.");
+
+    auto input = FileIO::ReadFile(modelPath.string());
+    Check(input != nullptr, "Cannot read the ParaView comparison model.");
+    auto triangles = ExtractAndTriangulate(input);
+    Check(triangles->GetNumberOfFaces() == ExpectedParaViewTriangleCount,
+          "The ParaView comparison model has an unexpected triangle count.");
+
+    auto filter = TriangleStripFilter::New();
+    filter->SetInput(triangles);
+    filter->SetMaximumLength(1000);
+    filter->SetJoinContiguousSegments(false);
+    Check(filter->Execute(),
+          "TriangleStripFilter failed for the ParaView comparison model.");
+    std::cout << "  ParaView-compatible cells: triangles="
+              << triangles->GetNumberOfFaces()
+              << ", strips=" << filter->GetNumberOfStrips()
+              << ", output cells=" << filter->GetNumberOfOutputCells()
+              << '\n';
+    Check(filter->GetNumberOfStrips() == ExpectedParaViewOutputCellCount,
+          "Triangle-strip count differs from ParaView 5.12/vtkStripper 9.3.");
+    Check(filter->GetNumberOfOutputCells() ==
+                  ExpectedParaViewOutputCellCount,
+          "ParaView-compatible output-cell count is incorrect.");
+
+}
+
 void TestContiguousPolylineJoining(const SurfaceMesh::Pointer& triangles) {
     // An open triangle surface must not manufacture boundary lines. This is
     // the vtkStripper/ParaView behavior being guarded by this regression test.
@@ -425,6 +461,10 @@ void TestContiguousPolylineJoining(const SurfaceMesh::Pointer& triangles) {
     Check(separateLines != nullptr, "Separate polyline array is null.");
     Check(separateLines->GetNumberOfCells() == ExpectedInputLineSegmentCount,
           "The explicit input has an unexpected line-segment count.");
+    Check(separate->GetNumberOfOutputCells() ==
+                  separate->GetNumberOfStrips() +
+                          ExpectedInputLineSegmentCount,
+          "Separate-line output-cell count is incorrect.");
     for (IGsize lineId = 0; lineId < separateLines->GetNumberOfCells();
          ++lineId) {
         Check(separateLines->GetCellSize(lineId) == 2,
@@ -441,6 +481,9 @@ void TestContiguousPolylineJoining(const SurfaceMesh::Pointer& triangles) {
     Check(joinedLines != nullptr, "Joined polyline array is null.");
     Check(joinedLines->GetNumberOfCells() == ExpectedJoinedPolylineCount,
           "The contiguous input lines were not joined into one polyline.");
+    Check(joined->GetNumberOfOutputCells() ==
+                  joined->GetNumberOfStrips() + ExpectedJoinedPolylineCount,
+          "Joined-line output-cell count is incorrect.");
 
     const igIndex* joinedPointIds = nullptr;
     const int joinedPointCount = joinedLines->GetCellIds(0, joinedPointIds);
@@ -487,6 +530,8 @@ void TestPassThroughPolygonAttributes(const SurfaceMesh::Pointer& triangles) {
           "A non-triangle polygon unexpectedly generated a strip.");
     Check(filter->GetPassThroughPolys()->GetNumberOfCells() == 1,
           "The non-triangle polygon was not passed through.");
+    Check(filter->GetNumberOfOutputCells() == 1,
+          "Pass-through polygon output-cell count is incorrect.");
 
     auto output = DynamicCast<SurfaceMesh>(filter->GetOutput());
     Check(output != nullptr && output->GetNumberOfFaces() == 1,
@@ -546,6 +591,10 @@ int main() {
         std::cout << "[RUN] triangle-strip generation\n";
         TestTriangleStripGeneration(triangles);
         std::cout << "[PASS] triangle-strip generation\n";
+
+        std::cout << "[RUN] ParaView output-cell comparison\n";
+        TestParaViewOutputCellCount();
+        std::cout << "[PASS] ParaView output-cell comparison\n";
 
         std::cout << "[RUN] contiguous-polyline joining\n";
         TestContiguousPolylineJoining(triangles);

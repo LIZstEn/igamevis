@@ -61,6 +61,15 @@ TriangleStripFilter::TriangleStripFilter() {
 void TriangleStripFilter::SetMaximumLength(int length) { m_MaximumLength = std::max(1, length); }
 IGsize TriangleStripFilter::GetNumberOfStrips() const noexcept { return m_Strips ? m_Strips->GetNumberOfCells() : 0; }
 
+IGsize TriangleStripFilter::GetNumberOfOutputCells() const noexcept {
+    const IGsize stripCount = m_Strips ? m_Strips->GetNumberOfCells() : 0;
+    const IGsize polygonCount = m_PassThroughPolys
+            ? m_PassThroughPolys->GetNumberOfCells()
+            : 0;
+    const IGsize lineCount = m_PolyLines ? m_PolyLines->GetNumberOfCells() : 0;
+    return stripCount + polygonCount + lineCount;
+}
+
 bool TriangleStripFilter::ReadOutputStrips(
         DataObject::Pointer output, CellArray::Pointer& strips,
         CellArray::Pointer& stripSourceFaceIds) {
@@ -286,13 +295,20 @@ bool TriangleStripFilter::BuildTriangleStrips() {
 }
 
 TriangleStripFilter::StripCandidate TriangleStripFilter::FindBestStrip(igIndex seedFaceId) {
-    StripCandidate best;
+    StripCandidate singleTriangle;
     for (int localEdge = 0; localEdge < 3; ++localEdge) {
         OrientedEdge start{seedFaceId, localEdge};
         StripCandidate candidate = TraceStrip(start);
-        if (candidate.GetTriangleCount() > best.GetTriangleCount()) { best = std::move(candidate); }
+        if (candidate.GetTriangleCount() > 1) {
+            // vtkStripper accepts the first edge, in face point order, that
+            // reaches an unvisited triangle.  Choosing the longest of all
+            // three trials changes later seed availability and therefore the
+            // final output-cell count on larger meshes.
+            return candidate;
+        }
+        if (localEdge == 0) { singleTriangle = std::move(candidate); }
     }
-    return best;
+    return singleTriangle;
 }
 
 TriangleStripFilter::StripCandidate TriangleStripFilter::TraceStrip(const OrientedEdge& startEdge) {
@@ -416,17 +432,19 @@ igIndex TriangleStripFilter::FindAvailableNeighbor(igIndex edgeId, igIndex curre
     const igIndex* faceIds = nullptr;
     int faceCount = 0;
     m_InputMesh->GetEdgeToNeighborFaces(edgeId, faceIds, faceCount);
-    igIndex result = -1;
-
     for (int i = 0; i < faceCount; ++i) {
         const igIndex candidate = faceIds[i];
         if (candidate == currentFaceId) continue;
-        if (!IsTriangleFace(candidate)) continue;
-        if (m_FaceMarks[candidate] != FaceMark::Free) { continue; }
-        if (result >= 0) return -1;
-        result = candidate;
+        // vtkStripper consults the first edge neighbor returned by the mesh.
+        // It does not select another neighbor when that first one is already
+        // visited or is not a triangle (relevant on non-manifold edges).
+        if (!IsTriangleFace(candidate) ||
+            m_FaceMarks[candidate] != FaceMark::Free) {
+            return -1;
+        }
+        return candidate;
     }
-    return result;
+    return -1;
 }
 
 igIndex TriangleStripFilter::FindThirdPoint(igIndex faceId, igIndex edgePoint0, igIndex edgePoint1) const {

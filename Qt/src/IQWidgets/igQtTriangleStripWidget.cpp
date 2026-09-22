@@ -137,6 +137,7 @@ igQtTriangleStripWidget::igQtTriangleStripWidget(QWidget* parent) : QWidget(pare
     m_TrianglesBefore = addStatistic(QStringLiteral("转换前三角形数"), "trianglesBefore");
     m_TrianglesAfter = addStatistic(QStringLiteral("转换后三角形数"), "trianglesAfter");
     m_StripCount = addStatistic(QStringLiteral("三角带数量"), "stripCount");
+    m_OutputCellCount = addStatistic(QStringLiteral("输出 Cell 数"), "outputCellCount");
     m_LongestStrip = addStatistic(QStringLiteral("实际最长三角带"), "longestStrip");
     m_LineCount = addStatistic(QStringLiteral("输入线段 → 输出折线"), "polyLineCount");
     m_PointCount = addStatistic(QStringLiteral("表面点数"), "stripPointCount");
@@ -199,7 +200,9 @@ bool igQtTriangleStripWidget::isOutput(iGame::DataObject* object) const {
 }
 
 void igQtTriangleStripWidget::clearStatistics() {
-    for (auto* label : {m_TrianglesBefore, m_TrianglesAfter, m_StripCount, m_LongestStrip, m_LineCount, m_PointCount}) {
+    for (auto* label : {m_TrianglesBefore, m_TrianglesAfter, m_StripCount,
+                        m_OutputCellCount, m_LongestStrip, m_LineCount,
+                        m_PointCount}) {
         label->setText(QStringLiteral("—"));
     }
 }
@@ -330,12 +333,14 @@ bool igQtTriangleStripWidget::apply() {
         m_TrianglesBefore->setText(countText(triangles->GetNumberOfFaces()));
         m_TrianglesAfter->setText(countText(triangleCount));
         m_StripCount->setText(countText(filter->GetNumberOfStrips()));
+        m_OutputCellCount->setText(countText(filter->GetNumberOfOutputCells()));
         m_LongestStrip->setText(countText(filter->GetLongestStripLength()));
         m_LineCount->setText(countText(segmentCount) + QStringLiteral(" → ") + countText(lines ? lines->GetNumberOfCells() : 0));
         m_PointCount->setText(countText(output->GetNumberOfPoints()));
         showStatus(QStringLiteral("转换完成。"));
         std::cout << "[TriangleStrip] Triangles before: " << triangles->GetNumberOfFaces()
                   << ", after: " << triangleCount << ", strips: " << filter->GetNumberOfStrips()
+                  << ", output cells (ParaView): " << filter->GetNumberOfOutputCells()
                   << ", longest: " << filter->GetLongestStripLength()
                   << ", input line segments: " << segmentCount
                   << ", polylines: " << (lines ? lines->GetNumberOfCells() : 0) << '\n';

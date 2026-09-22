@@ -82,6 +82,11 @@ public:
             "TriangleStripSourceFaceIds";
 
     IGsize GetNumberOfStrips() const noexcept;
+    /**
+     * 返回与 vtkPolyData::GetNumberOfCells/ParaView 信息面板一致的输出
+     * Cell 统计口径：triangle strips + pass-through polygons + polylines。
+     */
+    IGsize GetNumberOfOutputCells() const noexcept;
     IGsize GetLongestStripLength() const noexcept { return m_LongestStripLength; }
 
 protected:
@@ -164,8 +169,8 @@ private:
     // ----------------------- Triangle-strip search ------------------------
 
     /**
-     * 从种子三角形的三个有向边分别试探，返回覆盖未访问三角形最多的候选。
-     * 这是对 vtkStripper 单路径贪心的 GLU MaximumStrip 风格增强。
+     * 按种子三角形的面内边顺序试探，返回第一个可延伸候选；若三条边均
+     * 不可延伸，则返回单三角形 strip。该选择顺序与 vtkStripper 一致。
      */
     StripCandidate FindBestStrip(igIndex seedFaceId);
 
